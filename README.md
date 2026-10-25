@@ -28,10 +28,12 @@ match recognize_rgba(&pixels, width, height) {
 
 Recognition blocks, so call it from a worker thread in a GUI app. Use `max_image_dimension()` to render pages no larger than the engine works with, and `is_available()` to hide OCR features on platforms without an engine.
 
-To try it on an image:
+`recognize_lines` returns the same lines with each word's box in the image, in pixels from the top left. Engines read a line at a time and know nothing of the layout, so text in columns or boxes can come back interleaved, or with two columns read as one line. The boxes let you put it back together.
+
+To try it on an image, with `--lines` to see the boxes:
 
 ```sh
-cargo run --example recognize -- page.png
+cargo run --example recognize -- page.png --lines
 ```
 
 ## License

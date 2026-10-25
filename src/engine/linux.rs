@@ -13,7 +13,7 @@ use std::{
 
 use libloading::Library;
 
-use crate::{Error, Result};
+use crate::{Error, Line, Rect, Result, Word};
 
 /// The sonames to try, newest first. The C API used here is the same in both.
 const LIBRARIES: [&str; 2] = ["libtesseract.so.5", "libtesseract.so.4"];
@@ -42,10 +42,20 @@ struct Api {
 	init: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
 	set_image: unsafe extern "C" fn(Handle, *const c_uchar, c_int, c_int, c_int, c_int),
 	recognize: unsafe extern "C" fn(Handle, *mut c_void) -> c_int,
-	get_utf8_text: unsafe extern "C" fn(Handle) -> *mut c_char,
+	get_iterator: unsafe extern "C" fn(Handle) -> Handle,
+	delete_iterator: unsafe extern "C" fn(Handle),
+	page_iterator: unsafe extern "C" fn(Handle) -> Handle,
+	iterator_text: unsafe extern "C" fn(Handle, c_int) -> *mut c_char,
+	next: unsafe extern "C" fn(Handle, c_int) -> c_int,
+	is_at_beginning_of: unsafe extern "C" fn(Handle, c_int) -> c_int,
+	bounding_box: unsafe extern "C" fn(Handle, c_int, *mut c_int, *mut c_int, *mut c_int, *mut c_int) -> c_int,
 	delete_text: unsafe extern "C" fn(*const c_char),
 	_library: Library,
 }
+
+/// Tesseract's `TessPageIteratorLevel`s, of which only these two are walked.
+const TEXTLINE: c_int = 2;
+const WORD: c_int = 3;
 
 impl Api {
 	fn load() -> Option<Self> {
@@ -58,7 +68,13 @@ impl Api {
 				init: *library.get(c"TessBaseAPIInit3").ok()?,
 				set_image: *library.get(c"TessBaseAPISetImage").ok()?,
 				recognize: *library.get(c"TessBaseAPIRecognize").ok()?,
-				get_utf8_text: *library.get(c"TessBaseAPIGetUTF8Text").ok()?,
+				get_iterator: *library.get(c"TessBaseAPIGetIterator").ok()?,
+				delete_iterator: *library.get(c"TessResultIteratorDelete").ok()?,
+				page_iterator: *library.get(c"TessResultIteratorGetPageIterator").ok()?,
+				iterator_text: *library.get(c"TessResultIteratorGetUTF8Text").ok()?,
+				next: *library.get(c"TessResultIteratorNext").ok()?,
+				is_at_beginning_of: *library.get(c"TessPageIteratorIsAtBeginningOf").ok()?,
+				bounding_box: *library.get(c"TessPageIteratorBoundingBox").ok()?,
 				delete_text: *library.get(c"TessDeleteText").ok()?,
 				_library: library,
 			})
@@ -80,7 +96,7 @@ pub const fn max_image_dimension() -> u32 {
 	4000
 }
 
-pub fn recognize_rgba(rgba: &[u8], width: u32, height: u32) -> Result<String> {
+pub fn recognize_lines(rgba: &[u8], width: u32, height: u32) -> Result<Vec<Line>> {
 	let api = api().ok_or(Error::NotInstalled)?;
 	let (datapath, languages) = find_languages().ok_or(Error::NoLanguage)?;
 	let dimension = |value: u32| c_int::try_from(value).map_err(|_| Error::InvalidImage("too large".to_string()));
@@ -99,18 +115,56 @@ pub fn recognize_rgba(rgba: &[u8], width: u32, height: u32) -> Result<String> {
 		if (api.recognize)(engine.0, null_mut()) != 0 {
 			return Err(Error::Failed("recognizing failed".to_string()));
 		}
-		let text = (api.get_utf8_text)(engine.0);
-		if text.is_null() {
-			return Err(Error::Failed("reading the text failed".to_string()));
+		let iterator = (api.get_iterator)(engine.0);
+		if iterator.is_null() {
+			return Ok(Vec::new());
 		}
-		let lines = CStr::from_ptr(text)
-			.to_string_lossy()
-			.lines()
-			.filter(|line| !line.trim().is_empty())
-			.collect::<Vec<_>>()
-			.join("\n");
-		(api.delete_text)(text);
+		let iterator = Iterator(iterator, api);
+		let page = (api.page_iterator)(iterator.0);
+		let mut lines: Vec<Line> = Vec::new();
+		loop {
+			if lines.is_empty() || (api.is_at_beginning_of)(page, TEXTLINE) != 0 {
+				let text = take_text(api, (api.iterator_text)(iterator.0, TEXTLINE)).unwrap_or_default();
+				lines.push(Line { text: text.trim_end_matches(['\n', '\r']).to_string(), words: Vec::new() });
+			}
+			let (mut left, mut top, mut right, mut bottom) = (0, 0, 0, 0);
+			if let Some(text) = take_text(api, (api.iterator_text)(iterator.0, WORD))
+				&& (api.bounding_box)(page, WORD, &raw mut left, &raw mut top, &raw mut right, &raw mut bottom) != 0
+				&& let Some(line) = lines.last_mut()
+			{
+				line.words.push(Word { text, bounds: pixels(left, top, right, bottom) });
+			}
+			if (api.next)(iterator.0, WORD) == 0 {
+				break;
+			}
+		}
+		lines.retain(|line| !line.text.trim().is_empty());
 		Ok(lines)
+	}
+}
+
+/// Takes ownership of text Tesseract allocated, or `None` for a null pointer.
+unsafe fn take_text(api: &Api, text: *mut c_char) -> Option<String> {
+	if text.is_null() {
+		return None;
+	}
+	let owned = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
+	unsafe { (api.delete_text)(text) };
+	Some(owned)
+}
+
+/// Turns Tesseract's box edges into a rectangle. Both measure in pixels from the top left.
+#[allow(clippy::cast_precision_loss, reason = "image sides are far below where f32 loses whole pixels")]
+const fn pixels(left: c_int, top: c_int, right: c_int, bottom: c_int) -> Rect {
+	Rect { x: left as f32, y: top as f32, width: (right - left) as f32, height: (bottom - top) as f32 }
+}
+
+/// A result iterator, deleted when dropped.
+struct Iterator<'a>(Handle, &'a Api);
+
+impl Drop for Iterator<'_> {
+	fn drop(&mut self) {
+		unsafe { (self.1.delete_iterator)(self.0) };
 	}
 }
 

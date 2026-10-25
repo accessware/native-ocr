@@ -1,6 +1,6 @@
 [package]
 name = "native-ocr"
-version = "0.2.0"
+version = "0.2.1"
 description = "Text recognition with the OCR engine built into the operating system: Windows.Media.Ocr on Windows, Vision on macOS and Tesseract on Linux"
 readme = "README.md"
 repository = "https://github.com/trypsynth/native-ocr"
@@ -14,10 +14,10 @@ windows = { version = "0.62.2", features = ["Foundation", "Foundation_Collection
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFData"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFData"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColorSpace", "CGDataProvider", "CGImage"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSString"] }
-objc2-vision = { version = "0.3.2", default-features = false, features = ["std", "VNRecognizeTextRequest", "VNRequest", "VNRequestHandler", "VNObservation", "objc2-core-graphics"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSRange", "NSString"] }
+objc2-vision = { version = "0.3.2", default-features = false, features = ["std", "VNRecognizeTextRequest", "VNRequest", "VNRequestHandler", "VNObservation", "objc2-core-foundation", "objc2-core-graphics"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.9.0"

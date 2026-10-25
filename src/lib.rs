@@ -16,8 +16,10 @@
 #[cfg_attr(not(any(windows, target_os = "macos", target_os = "linux")), path = "engine/unavailable.rs")]
 mod engine;
 mod error;
+mod line;
 
 pub use error::{Error, Result};
+pub use line::{Line, Rect, Word};
 
 /// Whether this system has an OCR engine. A `true` here can still fail with
 /// [`Error::NoLanguage`] on Windows and Linux. On Linux this loads Tesseract the first time it's
@@ -48,9 +50,24 @@ pub fn max_image_dimension() -> u32 {
 /// [`Error::NoLanguage`] when Windows has no OCR language pack for the user's languages or Linux
 /// has no Tesseract language data, and [`Error::Failed`] when the engine fails.
 pub fn recognize_rgba(rgba: &[u8], width: u32, height: u32) -> Result<String> {
+	let lines = recognize_lines(rgba, width, height)?;
+	Ok(lines.into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n"))
+}
+
+/// Recognizes the text in an RGBA8 bitmap like [`recognize_rgba`], returning each line with where
+/// its words are in the image.
+///
+/// Engines read a page a line at a time and know nothing of its layout, so text set in columns or
+/// in boxes can come back with the lines of different columns in between each other, or with two
+/// columns read as one line. The word boxes are what an app needs to put such text back together.
+///
+/// # Errors
+///
+/// As [`recognize_rgba`].
+pub fn recognize_lines(rgba: &[u8], width: u32, height: u32) -> Result<Vec<Line>> {
 	let expected = (width as usize) * (height as usize) * 4;
 	if width == 0 || height == 0 || rgba.len() != expected {
 		return Err(Error::InvalidImage(format!("{width}x{height} needs {expected} bytes, got {}", rgba.len())));
 	}
-	engine::recognize_rgba(rgba, width, height)
+	engine::recognize_lines(rgba, width, height)
 }

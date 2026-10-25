@@ -5,7 +5,7 @@ use std::ptr::{addr_of_mut, copy_nonoverlapping, null_mut};
 
 use windows::{
 	Graphics::Imaging::{BitmapBufferAccessMode, BitmapPixelFormat, SoftwareBitmap},
-	Media::Ocr::OcrEngine,
+	Media::Ocr::{OcrEngine, OcrLine},
 	Win32::{
 		Foundation::RPC_E_CHANGED_MODE,
 		System::{
@@ -16,7 +16,7 @@ use windows::{
 	core::{Error as WinError, Interface},
 };
 
-use crate::{Error, Result};
+use crate::{Error, Line, Rect, Result, Word};
 
 pub const fn is_available() -> bool {
 	true
@@ -27,7 +27,7 @@ pub fn max_image_dimension() -> u32 {
 	OcrEngine::MaxImageDimension().unwrap_or(2600)
 }
 
-pub fn recognize_rgba(rgba: &[u8], width: u32, height: u32) -> Result<String> {
+pub fn recognize_lines(rgba: &[u8], width: u32, height: u32) -> Result<Vec<Line>> {
 	let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
 	let initialized = hr.is_ok();
 	if !initialized && hr != RPC_E_CHANGED_MODE {
@@ -40,14 +40,30 @@ pub fn recognize_rgba(rgba: &[u8], width: u32, height: u32) -> Result<String> {
 	result
 }
 
-fn recognize(rgba: &[u8], width: u32, height: u32) -> Result<String> {
+fn recognize(rgba: &[u8], width: u32, height: u32) -> Result<Vec<Line>> {
 	let engine = create_engine()?;
 	let bitmap = build_bitmap(rgba, width, height)?;
 	let result = engine.RecognizeAsync(&bitmap).and_then(|op| op.join()).map_err(|err| failed("recognizing", &err))?;
 	let lines = result.Lines().map_err(|err| failed("reading the lines", &err))?;
-	let text: Vec<String> =
-		lines.into_iter().filter_map(|line| line.Text().ok()).map(|text| text.to_string_lossy()).collect();
-	Ok(text.join("\n"))
+	Ok(lines.into_iter().filter_map(|line| read_line(&line)).collect())
+}
+
+/// A line and its words, or `None` for one the engine can't hand back, which is left out rather than failing the whole image.
+fn read_line(line: &OcrLine) -> Option<Line> {
+	let text = line.Text().ok()?.to_string_lossy();
+	let words = line
+		.Words()
+		.ok()?
+		.into_iter()
+		.filter_map(|word| {
+			let bounds = word.BoundingRect().ok()?;
+			Some(Word {
+				text: word.Text().ok()?.to_string_lossy(),
+				bounds: Rect { x: bounds.X, y: bounds.Y, width: bounds.Width, height: bounds.Height },
+			})
+		})
+		.collect();
+	Some(Line { text, words })
 }
 
 /// Creates an engine for the user's profile languages. The API gives no reason when it can't, so
